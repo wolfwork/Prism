@@ -1,3 +1,5 @@
+jooq_codegen
+deploy.sh
 pass.txt
 dev.sh
 dependency-reduced-pom.xml
@@ -57,6 +59,4 @@ manifest.mf
 # Mac filesystem dust
 .DS_Store
 
-# Other Libraries
-*.jar
 

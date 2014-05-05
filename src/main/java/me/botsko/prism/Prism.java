@@ -1,55 +1,32 @@
 package me.botsko.prism;
 
-import java.io.IOException;
-import java.sql.Connection;
-import java.sql.SQLException;
-import java.sql.Statement;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.logging.Logger;
+import com.sk89q.worldedit.bukkit.WorldEditPlugin;
 
 import me.botsko.elixr.MaterialAliases;
-import me.botsko.prism.actionlibs.ActionRecorder;
-import me.botsko.prism.actionlibs.ActionRegistry;
-import me.botsko.prism.actionlibs.ActionsQuery;
-import me.botsko.prism.actionlibs.HandlerRegistry;
-import me.botsko.prism.actionlibs.Ignore;
-import me.botsko.prism.actionlibs.QueryParameters;
-import me.botsko.prism.actionlibs.QueryResult;
+import me.botsko.elixr.TypeUtils;
+import me.botsko.prism.actionlibs.*;
 import me.botsko.prism.appliers.PreviewSession;
-import me.botsko.prism.appliers.PrismProcessType;
 import me.botsko.prism.bridge.PrismBlockEditSessionFactory;
-import me.botsko.prism.commandlibs.PreprocessArgs;
 import me.botsko.prism.commands.PrismCommands;
 import me.botsko.prism.commands.WhatCommand;
-import me.botsko.prism.listeners.PrismBlockEvents;
-import me.botsko.prism.listeners.PrismChannelChatEvents;
-import me.botsko.prism.listeners.PrismCustomEvents;
-import me.botsko.prism.listeners.PrismEntityEvents;
-import me.botsko.prism.listeners.PrismInventoryEvents;
-import me.botsko.prism.listeners.PrismPlayerEvents;
-import me.botsko.prism.listeners.PrismVehicleEvents;
-import me.botsko.prism.listeners.PrismWorldEvents;
+import me.botsko.prism.listeners.*;
 import me.botsko.prism.listeners.self.PrismMiscEvents;
 import me.botsko.prism.measurement.Metrics;
 import me.botsko.prism.measurement.QueueStats;
 import me.botsko.prism.measurement.TimeTaken;
 import me.botsko.prism.monitors.OreMonitor;
 import me.botsko.prism.monitors.UseMonitor;
-import me.botsko.prism.purge.LogPurgeCallback;
-import me.botsko.prism.purge.PurgeTask;
+import me.botsko.prism.parameters.*;
+import me.botsko.prism.players.PlayerIdentification;
+import me.botsko.prism.players.PrismPlayer;
+import me.botsko.prism.purge.PurgeManager;
 import me.botsko.prism.wands.Wand;
 
 import org.apache.tomcat.jdbc.pool.DataSource;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.block.Block;
-import org.bukkit.command.CommandExecutor;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
@@ -57,830 +34,1010 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
-import com.sk89q.worldedit.bukkit.WorldEditPlugin;
+import java.io.IOException;
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 public class Prism extends JavaPlugin {
 
-	/**
-	 * Connection Pool
-	 */
-	private static DataSource pool = new DataSource();
+    /**
+     * Connection Pool
+     */
+    private static DataSource pool = new DataSource();
 
-	/**
-	 * Protected/private
-	 */
-	private static String plugin_name;
-	private String plugin_version;
-	private MaterialAliases items;
-	private Language language;
-	private static Logger log = Logger.getLogger("Minecraft");
-	private ArrayList<String> enabledPlugins = new ArrayList<String>();
-	private static ActionRegistry actionRegistry;
-	private static HandlerRegistry<?> handlerRegistry;
-	private static Ignore ignore;
-	protected static ArrayList<Integer> illegalBlocks;
-	protected static ArrayList<String> illegalEntities;
-	protected static HashMap<String,String> alertedOres = new HashMap<String,String>();
+    /**
+     * Protected/private
+     */
+    private static String plugin_name;
+    private String plugin_version;
+    private static MaterialAliases items;
+    private Language language;
+    private static Logger log = Logger.getLogger( "Minecraft" );
+    private final ArrayList<String> enabledPlugins = new ArrayList<String>();
+    private static ActionRegistry actionRegistry;
+    private static HandlerRegistry<?> handlerRegistry;
+    private static Ignore ignore;
+    protected static ArrayList<Integer> illegalBlocks;
+    protected static ArrayList<String> illegalEntities;
+    protected static HashMap<String, String> alertedOres = new HashMap<String, String>();
+    private static HashMap<String, PrismParameterHandler> paramHandlers = new HashMap<String, PrismParameterHandler>();
+    private final ScheduledThreadPoolExecutor schedulePool = new ScheduledThreadPoolExecutor( 1 );
+    private final ScheduledThreadPoolExecutor recordingMonitorTask = new ScheduledThreadPoolExecutor( 1 );
+    // private ScheduledFuture<?> scheduledPurgeExecutor;
+    private PurgeManager purgeManager;
 
-	/**
-	 * Public
-	 */
-	public Prism prism;
-	public static Messenger messenger;
-	public static FileConfiguration config;
-	public WorldEditPlugin plugin_worldEdit = null;
-	public static ActionRecorder actionsRecorder;
-	public ActionsQuery actionsQuery;
-	public OreMonitor oreMonitor;
-	public UseMonitor useMonitor;
-	public ConcurrentHashMap<String, Wand> playersWithActiveTools = new ConcurrentHashMap<String, Wand>();
-	public ConcurrentHashMap<String, PreviewSession> playerActivePreviews = new ConcurrentHashMap<String, PreviewSession>();
-	public ConcurrentHashMap<String, ArrayList<Block>> playerActiveViews = new ConcurrentHashMap<String, ArrayList<Block>>();
-	public ConcurrentHashMap<String, QueryResult> cachedQueries = new ConcurrentHashMap<String, QueryResult>();
-	public ConcurrentHashMap<Location, Long> alertedBlocks = new ConcurrentHashMap<Location, Long>();
-	public TimeTaken eventTimer;
-	public QueueStats queueStats;
-	public BukkitTask deleteTask;
-	public int total_records_affected = 0;
+    /**
+     * Public
+     */
+    public Prism prism;
+    public static Messenger messenger;
+    public static FileConfiguration config;
+    public static WorldEditPlugin plugin_worldEdit = null;
+    public ActionsQuery actionsQuery;
+    public OreMonitor oreMonitor;
+    public UseMonitor useMonitor;
+    public static ConcurrentHashMap<String, Wand> playersWithActiveTools = new ConcurrentHashMap<String, Wand>();
+    public ConcurrentHashMap<String, PreviewSession> playerActivePreviews = new ConcurrentHashMap<String, PreviewSession>();
+    public ConcurrentHashMap<String, ArrayList<Block>> playerActiveViews = new ConcurrentHashMap<String, ArrayList<Block>>();
+    public ConcurrentHashMap<String, QueryResult> cachedQueries = new ConcurrentHashMap<String, QueryResult>();
+    public ConcurrentHashMap<Location, Long> alertedBlocks = new ConcurrentHashMap<Location, Long>();
+    public TimeTaken eventTimer;
+    public QueueStats queueStats;
+    public BukkitTask recordingTask;
+    public int total_records_affected = 0;
 
-	/**
-	 * We store a basic index of blocks we anticipate will fall, so that when
-	 * they do fall we can attribute them to the player who broke the original
-	 * block.
-	 * 
-	 * Once the block fall is registered, it's removed from here, so data should
-	 * not remain here long.
-	 */
-	public ConcurrentHashMap<String, String> preplannedBlockFalls = new ConcurrentHashMap<String, String>();
+    /**
+     * DB Foreign key caches
+     */
+    public static HashMap<String, Integer> prismWorlds = new HashMap<String, Integer>();
+    public static HashMap<UUID,PrismPlayer> prismPlayers = new HashMap<UUID,PrismPlayer>();
+    public static HashMap<String, Integer> prismActions = new HashMap<String, Integer>();
 
-	/**
-	 * VehicleCreateEvents do not include the player/entity that created it, so
-	 * we need to track players right-clicking rails with minecart vehicles, or
-	 * water for boats
-	 */
-	public ConcurrentHashMap<String, String> preplannedVehiclePlacement = new ConcurrentHashMap<String, String>();
+    /**
+     * We store a basic index of blocks we anticipate will fall, so that when
+     * they do fall we can attribute them to the player who broke the original
+     * block.
+     * 
+     * Once the block fall is registered, it's removed from here, so data should
+     * not remain here long.
+     */
+    public ConcurrentHashMap<String, String> preplannedBlockFalls = new ConcurrentHashMap<String, String>();
 
-	
-	/**
-	 * Enables the plugin and activates our player listeners
-	 */
-	@SuppressWarnings("rawtypes")
-	@Override
-	public void onEnable() {
+    /**
+     * VehicleCreateEvents do not include the player/entity that created it, so
+     * we need to track players right-clicking rails with minecart vehicles, or
+     * water for boats
+     */
+    public ConcurrentHashMap<String, String> preplannedVehiclePlacement = new ConcurrentHashMap<String, String>();
 
-		plugin_name = this.getDescription().getName();
-		plugin_version = this.getDescription().getVersion();
+    /**
+     * Enables the plugin and activates our player listeners
+     */
+    @SuppressWarnings("rawtypes")
+    @Override
+    public void onEnable() {
 
-		prism = this;
+        plugin_name = this.getDescription().getName();
+        plugin_version = this.getDescription().getVersion();
 
-		log("Initializing Prism " + plugin_version + ". By Viveleroi.");
+        prism = this;
 
-		if (getConfig().getBoolean("prism.notify-newer-versions")) {
-			String notice = UpdateNotification.checkForNewerBuild(plugin_version);
-			if (notice != null) {
-				log(notice);
-			}
-		}
+        log( "Initializing Prism " + plugin_version + ". By Viveleroi." );
 
-		// Load configuration, or install if new
-		loadConfig();
+        // Load configuration, or install if new
+        loadConfig();
 
-		if (getConfig().getBoolean("prism.allow-metrics")) {
-			try {
-				Metrics metrics = new Metrics(this);
+        if( getConfig().getBoolean( "prism.allow-metrics" ) ) {
+            try {
+                final Metrics metrics = new Metrics( this );
+                metrics.start();
+            } catch ( final IOException e ) {
+                log( "MCStats submission failed." );
+            }
+        }
 
-				// See who's using mysql vs sqlite
-				Metrics.Graph databaseGraph = metrics.createGraph("Database Engine");
-				databaseGraph.addPlotter(new Metrics.Plotter(prism.getConfig().getString("prism.database.mode")) {
-					@Override
-					public int getValue() {
-						return 1;
-					}
-				});
+        // init db
+        pool = initDbPool();
+        final Connection test_conn = dbc();
+        if( pool == null || test_conn == null ) {
+            final String[] dbDisabled = new String[3];
+            dbDisabled[0] = "Prism will disable itself because it couldn't connect to a database.";
+            dbDisabled[1] = "If you're using MySQL, check your config. Be sure MySQL is running.";
+            dbDisabled[2] = "For help - try http://discover-prism.com/wiki/view/troubleshooting/";
+            logSection( dbDisabled );
+            disablePlugin();
+        }
+        if( test_conn != null ) {
+            try {
+                test_conn.close();
+            } catch ( final SQLException e ) {
+                handleDatabaseException( e );
+            }
+        }
 
-				metrics.start();
-			} catch (IOException e) {
-				log("MCStats submission failed.");
-			}
-		}
+        if( isEnabled() ) {
 
-		// init db
-		pool = initDbPool();
-		Connection test_conn = dbc();
-		if (pool == null || test_conn == null) {
-			String[] dbDisabled = new String[3];
-			dbDisabled[0] = "Prism will disable itself because it couldn't connect to a database.";
-			dbDisabled[1] = "If you're using MySQL, check your config. Be sure MySQL is running.";
-			dbDisabled[2] = "For help - try http://discover-prism.com/wiki/view/troubleshooting/";
-			logSection(dbDisabled);
-			disablePlugin();
-		} else {
-			if (getConfig().getString("prism.database.mode").equalsIgnoreCase("sqlite")) {
-				Statement st;
-				try {
-					st = test_conn.createStatement();
-					st.executeUpdate("PRAGMA journal_mode = WAL;");
-					st.close();
-				} catch (SQLException e) {
-					handleDatabaseException(e);
-				}
-			}
-		}
-		if (test_conn != null) {
-			try {
-				test_conn.close();
-			} catch (SQLException e) {
-				handleDatabaseException(e);
-			}
-		}
+            // Info needed for setup, init these here
+            handlerRegistry = new HandlerRegistry();
+            actionRegistry = new ActionRegistry();
 
-		if (isEnabled()) {
+            // Setup databases
+            setupDatabase();
 
-			// Setup databases
-			setupDatabase();
+            // Cache world IDs
+            cacheWorldPrimaryKeys();
+            PlayerIdentification.cacheOnlinePlayerPrimaryKeys();
 
-			// Apply any updates
-			Updater up = new Updater(this);
-			up.apply_updates();
+            // ensure current worlds are added
+            for ( final World w : getServer().getWorlds() ) {
+                if( !Prism.prismWorlds.containsKey( w.getName() ) ) {
+                    Prism.addWorldName( w.getName() );
+                }
+            }
 
-			eventTimer = new TimeTaken();
-			queueStats = new QueueStats();
-			handlerRegistry = new HandlerRegistry();
-			actionRegistry = new ActionRegistry();
-			ignore = new Ignore(this);
+            // Apply any updates
+            final Updater up = new Updater( this );
+            up.apply_updates();
 
-			// Plugins we use
-			checkPluginDependancies();
+            eventTimer = new TimeTaken( this );
+            queueStats = new QueueStats();
+            ignore = new Ignore( this );
 
-			// Assign event listeners
-			getServer().getPluginManager().registerEvents(new PrismBlockEvents(this), this);
-			getServer().getPluginManager().registerEvents(new PrismEntityEvents(this), this);
-			getServer().getPluginManager().registerEvents(new PrismWorldEvents(), this);
-			getServer().getPluginManager().registerEvents(new PrismPlayerEvents(this), this);
-			getServer().getPluginManager().registerEvents(new PrismInventoryEvents(this), this);
-			getServer().getPluginManager().registerEvents(new PrismVehicleEvents(this), this);
+            // Plugins we use
+            checkPluginDependancies();
 
-			if (getConfig().getBoolean("prism.tracking.api.enabled")) {
-				getServer().getPluginManager().registerEvents(new PrismCustomEvents(this), this);
-			}
+            // Assign event listeners
+            getServer().getPluginManager().registerEvents( new PrismBlockEvents( this ), this );
+            getServer().getPluginManager().registerEvents( new PrismEntityEvents( this ), this );
+            getServer().getPluginManager().registerEvents( new PrismWorldEvents(), this );
+            getServer().getPluginManager().registerEvents( new PrismPlayerEvents( this ), this );
+            getServer().getPluginManager().registerEvents( new PrismInventoryEvents( this ), this );
+            getServer().getPluginManager().registerEvents( new PrismVehicleEvents( this ), this );
 
-			// Assign Plugin listeners if enabled
-			if (dependencyEnabled("Herochat") && getConfig().getBoolean("prism.tracking.player-chat")) {
-				getServer().getPluginManager().registerEvents(new PrismChannelChatEvents(), this);
-			}
+            // BlockPhysics
+            if( getConfig().getBoolean( "prism.bukkit.listeners.blockphysicsevent" ) ) {
+                getServer().getPluginManager().registerEvents( new PrismBlockPhysicsEvent( this ), this );
+            } else {
+                log( "You've configured prism to never listen to the BlockPhysicsEvent." );
+                log( "Prism will not be able to track block-fall, and block detachments, i.e. torches and signs." );
+            }
 
-			// Assign listeners to our own events
-			// getServer().getPluginManager().registerEvents(new
-			// PrismRollbackEvents(), this);
-			getServer().getPluginManager().registerEvents(new PrismMiscEvents(), this);
+            // InventoryMoveItem
+            if( getConfig().getBoolean( "prism.track-hopper-item-events" ) && Prism.getIgnore().event( "item-insert" ) ) {
+                getServer().getPluginManager().registerEvents( new PrismInventoryMoveItemEvent(), this );
+            }
 
-			// Add commands
-			getCommand("prism").setExecutor((CommandExecutor) new PrismCommands(this));
-			getCommand("what").setExecutor((CommandExecutor) new WhatCommand(this));
+            if( getConfig().getBoolean( "prism.tracking.api.enabled" ) ) {
+                getServer().getPluginManager().registerEvents( new PrismCustomEvents( this ), this );
+            }
 
-			// Init re-used classes
-			messenger = new Messenger(plugin_name);
-			actionsRecorder = new ActionRecorder(this);
-			actionsQuery = new ActionsQuery(this);
-			oreMonitor = new OreMonitor(this);
-			useMonitor = new UseMonitor(this);
+            // Assign Plugin listeners if enabled
+            if( dependencyEnabled( "Herochat" ) && getConfig().getBoolean( "prism.tracking.player-chat" ) ) {
+                getServer().getPluginManager().registerEvents( new PrismChannelChatEvents(), this );
+            }
 
-			// Init async tasks
-			actionRecorderTask();
+            // Assign listeners to our own events
+            // getServer().getPluginManager().registerEvents(new
+            // PrismRollbackEvents(), this);
+            getServer().getPluginManager().registerEvents( new PrismMiscEvents(), this );
 
-			// Init scheduled events
-			endExpiredQueryCaches();
-			endExpiredPreviews();
-			removeExpiredLocations();
+            // Add commands
+            getCommand( "prism" ).setExecutor( new PrismCommands( this ) );
+            getCommand( "prism" ).setTabCompleter( new PrismCommands( this ) );
+            getCommand( "what" ).setExecutor( new WhatCommand( this ) );
 
-			// Delete old data based on config
-			discardExpiredDbRecords();
+            // Register official parameters
+            registerParameter( new ActionParameter() );
+            registerParameter( new BeforeParameter() );
+            registerParameter( new BlockParameter() );
+            registerParameter( new EntityParameter() );
+            registerParameter( new FlagParameter() );
+            registerParameter( new IdParameter() );
+            registerParameter( new KeywordParameter() );
+            registerParameter( new PlayerParameter() );
+            registerParameter( new RadiusParameter() );
+            registerParameter( new SinceParameter() );
+            registerParameter( new WorldParameter() );
 
-		}
-	}
+            // Init re-used classes
+            messenger = new Messenger( plugin_name );
+            actionsQuery = new ActionsQuery( this );
+            oreMonitor = new OreMonitor( this );
+            useMonitor = new UseMonitor( this );
 
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public static String getPrismName() {
-		return plugin_name;
-	}
+            // Init async tasks
+            actionRecorderTask();
 
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public String getPrismVersion() {
-		return this.plugin_version;
-	}
+            // Init scheduled events
+            endExpiredQueryCaches();
+            endExpiredPreviews();
+            removeExpiredLocations();
 
-	
-	/**
-	 * Load configuration and language files
-	 */
-	@SuppressWarnings("unchecked")
-	public void loadConfig() {
-		PrismConfig mc = new PrismConfig(this);
-		config = mc.getConfig();
-		
-		// Cache config arrays we check constantly
-		illegalBlocks = (ArrayList<Integer>) getConfig().getList("prism.appliers.never-place-block");
-		illegalEntities = (ArrayList<String>) getConfig().getList("prism.appliers.never-spawn-entity");
-		
-		ConfigurationSection alertBlocks = getConfig().getConfigurationSection("prism.alerts.ores.blocks");
-		if( alertBlocks != null){
-			for( String key : alertBlocks.getKeys(false) ){
-				alertedOres.put( key, alertBlocks.getString(key));
-			}
-		}
-		
-		// Load language files
-		// language = new Language( mc.getLang() );
-		// Load items db
-		items = new MaterialAliases();
-	}
+            // Delete old data based on config
+            launchScheduledPurgeManager();
 
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public DataSource initDbPool() {
+            // Keep watch on db connections, other sanity
+            launchInternalAffairs();
 
-		DataSource pool = null;
+        }
+    }
 
-		// SQLITE
-		if (getConfig().getString("prism.database.mode").equalsIgnoreCase("sqlite")) {
-			try {
-				Class.forName("org.sqlite.JDBC");
-				pool = new DataSource();
-				pool.setDriverClassName("org.sqlite.JDBC");
-				pool.setUrl("jdbc:sqlite:plugins/Prism/Prism.db");
-			} catch (ClassNotFoundException e) {
-				log("Error: SQLite database connection was not established. "+ e.getMessage());
-			}
-		}
+    /**
+     * 
+     * @return
+     */
+    public static String getPrismName() {
+        return plugin_name;
+    }
 
-		// MYSQL
-		else if (getConfig().getString("prism.database.mode").equalsIgnoreCase("mysql")) {
-			String dns = "jdbc:mysql://"
-					+ config.getString("prism.mysql.hostname") + ":"
-					+ config.getString("prism.mysql.port") + "/"
-					+ config.getString("prism.mysql.database");
-			pool = new DataSource();
-			pool.setDriverClassName("com.mysql.jdbc.Driver");
-			pool.setUrl(dns);
-			pool.setUsername(config.getString("prism.mysql.username"));
-			pool.setPassword(config.getString("prism.mysql.password"));
-		}
+    /**
+     * 
+     * @return
+     */
+    public String getPrismVersion() {
+        return this.plugin_version;
+    }
 
-		if (pool != null) {
-			pool.setInitialSize(config.getInt("prism.database.pool-initial-size"));
-			pool.setMaxActive(config.getInt("prism.database.max-pool-connections"));
-			pool.setMaxIdle(config.getInt("prism.database.max-idle-connections"));
-			pool.setMaxWait(config.getInt("prism.database.max-wait"));
-			pool.setRemoveAbandoned(true);
-			pool.setRemoveAbandonedTimeout(60);
-			pool.setTestOnBorrow(true);
-			pool.setValidationQuery("/* ping */SELECT 1");
-			pool.setValidationInterval(30000);
-		} else {
-			log("Error: Database connection was not established. Please check your configuration file.");
-		}
+    /**
+     * Load configuration and language files
+     */
+    @SuppressWarnings("unchecked")
+    public void loadConfig() {
+        final PrismConfig mc = new PrismConfig( this );
+        config = mc.getConfig();
 
-		return pool;
-	}
+        // Cache config arrays we check constantly
+        illegalBlocks = (ArrayList<Integer>) getConfig().getList( "prism.appliers.never-place-block" );
+        illegalEntities = (ArrayList<String>) getConfig().getList( "prism.appliers.never-spawn-entity" );
 
-	
-	/**
-	 * Attempt to rebuild the pool, useful for reloads and failed database
-	 * connections being restored
-	 */
-	public void rebuildPool() {
-		// Close pool connections when plugin disables
-		if (pool != null) {
-			pool.close();
-		}
-		pool = initDbPool();
-	}
+        final ConfigurationSection alertBlocks = getConfig().getConfigurationSection( "prism.alerts.ores.blocks" );
+        alertedOres.clear();
+        if( alertBlocks != null ) {
+            for ( final String key : alertBlocks.getKeys( false ) ) {
+                alertedOres.put( key, alertBlocks.getString( key ) );
+            }
+        }
 
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public static DataSource getPool() {
-		return Prism.pool;
-	}
+        // Load language files
+        // language = new Language( mc.getLang() );
+        // Load items db
+        items = new MaterialAliases();
+    }
 
-	
-	/**
-	 * 
-	 * @return
-	 * @throws SQLException
-	 */
-	public static Connection dbc() {
-		Connection con = null;
-		try {
-			con = pool.getConnection();
-		} catch (SQLException e) {
-			System.out.print("Database connection failed. " + e.getMessage());
-			if (!e.getMessage().contains("Pool empty")) {
-				e.printStackTrace();
-			}
-		}
-		return con;
-	}
+    @Override
+    public void reloadConfig() {
+        super.reloadConfig();
+        loadConfig();
+    }
 
-	
-	/**
-	 * Attempt to reconnect to the database
-	 * @return
-	 * @throws SQLException 
-	 */
-	protected boolean attemptToRescueConnection( SQLException e ) throws SQLException{
-		if( e.getMessage().contains("connection closed") ){
-			rebuildPool();
-			if( pool != null ){
-				Connection conn = dbc();
-				if( conn != null && !conn.isClosed() ){
-					return true;
-				}
-			}
-		}
-		return false;
-	}
-	
-	
-	/**
-	 * 
-	 */
-	public void handleDatabaseException(SQLException e) {
-		// Attempt to rescue
-		try {
-			if( attemptToRescueConnection( e ) ){
-				return;
-			}
-		} catch (SQLException e1){
-		}
-		log("Database connection error: " + e.getMessage());
-		if (e.getMessage().contains("marked as crashed")) {
-			String[] msg = new String[2];
-			msg[0] = "If MySQL crashes during write it may corrupt it's indexes.";
-			msg[1] = "Try running `CHECK TABLE prism_actions` and then `REPAIR TABLE prism_actions`.";
-			logSection(msg);
-		}
-		e.printStackTrace();
-	}
-	
-	
-	/**
+    /**
+     * 
+     * @return
+     */
+    public DataSource initDbPool() {
+
+        DataSource pool = null;
+
+        final String dns = "jdbc:mysql://" + config.getString( "prism.mysql.hostname" ) + ":"
+                + config.getString( "prism.mysql.port" ) + "/" + config.getString( "prism.mysql.database" );
+        pool = new DataSource();
+        pool.setDriverClassName( "com.mysql.jdbc.Driver" );
+        pool.setUrl( dns );
+        pool.setUsername( config.getString( "prism.mysql.username" ) );
+        pool.setPassword( config.getString( "prism.mysql.password" ) );
+        pool.setInitialSize( config.getInt( "prism.database.pool-initial-size" ) );
+        pool.setMaxActive( config.getInt( "prism.database.max-pool-connections" ) );
+        pool.setMaxIdle( config.getInt( "prism.database.max-idle-connections" ) );
+        pool.setMaxWait( config.getInt( "prism.database.max-wait" ) );
+        pool.setRemoveAbandoned( true );
+        pool.setRemoveAbandonedTimeout( 60 );
+        pool.setTestOnBorrow( true );
+        pool.setValidationQuery( "/* ping */SELECT 1" );
+        pool.setValidationInterval( 30000 );
+
+        return pool;
+    }
+
+    /**
+     * Attempt to rebuild the pool, useful for reloads and failed database
+     * connections being restored
+     */
+    public void rebuildPool() {
+        // Close pool connections when plugin disables
+        if( pool != null ) {
+            pool.close();
+        }
+        pool = initDbPool();
+    }
+
+    /**
+     * 
+     * @return
+     */
+    public static DataSource getPool() {
+        return Prism.pool;
+    }
+
+    /**
+     * 
+     * @return
+     * @throws SQLException
+     */
+    public static Connection dbc() {
+        Connection con = null;
+        try {
+            con = pool.getConnection();
+        } catch ( final SQLException e ) {
+            log( "Database connection failed. " + e.getMessage() );
+            if( !e.getMessage().contains( "Pool empty" ) ) {
+                e.printStackTrace();
+            }
+        }
+        return con;
+    }
+
+    /**
+     * Attempt to reconnect to the database
+     * 
+     * @return
+     * @throws SQLException
+     */
+    protected boolean attemptToRescueConnection(SQLException e) throws SQLException {
+        if( e.getMessage().contains( "connection closed" ) ) {
+            rebuildPool();
+            if( pool != null ) {
+                final Connection conn = dbc();
+                if( conn != null && !conn.isClosed() ) { return true; }
+            }
+        }
+        return false;
+    }
+
+    /**
 	 * 
 	 */
-	protected void setupDatabase() {
+    public void handleDatabaseException(SQLException e) {
+        String prefix = config.getString("prism.mysql.prefix");
+        // Attempt to rescue
+        try {
+            if( attemptToRescueConnection( e ) ) { return; }
+        } catch ( final SQLException e1 ) {}
+        log( "Database connection error: " + e.getMessage() );
+        if( e.getMessage().contains( "marked as crashed" ) ) {
+            final String[] msg = new String[2];
+            msg[0] = "If MySQL crashes during write it may corrupt it's indexes.";
+            msg[1] = "Try running `CHECK TABLE " + prefix + "data` and then `REPAIR TABLE " + prefix + "data`.";
+            logSection( msg );
+        }
+        e.printStackTrace();
+    }
 
-		// SQLITE
-		if (getConfig().getString("prism.database.mode").equalsIgnoreCase("sqlite")) {
+    /**
+     * 
+     */
+    protected void setupDatabase() {
+        String prefix = config.getString("prism.mysql.prefix");
+        Connection conn = null;
+        Statement st = null;
+        try {
+            conn = dbc();
+            if( conn == null )
+                return;
 
-			try {
-				final Connection conn = dbc();
-				String query = "CREATE TABLE IF NOT EXISTS `prism_actions` ("
-						+ "id INT PRIMARY KEY,"
-						+ "action_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
-						+ "action_type TEXT," + "player TEXT," + "world TEXT,"
-						+ "x INT," + "y INT," + "z INT," + "block_id INT,"
-						+ "block_subid INT," + "old_block_id INT,"
-						+ "old_block_subid INT," + "data TEXT" + ")";
-				Statement st = conn.createStatement();
-				st.executeUpdate(query);
-				st.executeUpdate("CREATE INDEX IF NOT EXISTS x ON prism_actions (x ASC)");
-				st.executeUpdate("CREATE INDEX IF NOT EXISTS action_type ON prism_actions (action_type ASC)");
-				st.executeUpdate("CREATE INDEX IF NOT EXISTS player ON prism_actions (player ASC)");
+            // actions
+            String query = "CREATE TABLE IF NOT EXISTS `" + prefix + "actions` ("
+                    + "`action_id` int(10) unsigned NOT NULL AUTO_INCREMENT," + "`action` varchar(25) NOT NULL,"
+                    + "PRIMARY KEY (`action_id`)," + "UNIQUE KEY `action` (`action`)"
+                    + ") ENGINE=InnoDB  DEFAULT CHARSET=utf8;";
+            st = conn.createStatement();
+            st.executeUpdate( query );
 
-				query = "CREATE TABLE IF NOT EXISTS `prism_meta` (id INT PRIMARY KEY," + "k TEXT," + "v TEXT" + ")";
-				st.executeUpdate(query);
-				st.close();
-				conn.close();
+            // data
+            query = "CREATE TABLE IF NOT EXISTS `" + prefix + "data` (" + "`id` int(10) unsigned NOT NULL AUTO_INCREMENT,"
+                    + "`epoch` int(10) unsigned NOT NULL," + "`action_id` int(10) unsigned NOT NULL,"
+                    + "`player_id` int(10) unsigned NOT NULL," + "`world_id` int(10) unsigned NOT NULL,"
+                    + "`x` int(11) NOT NULL," + "`y` int(11) NOT NULL," + "`z` int(11) NOT NULL,"
+                    + "`block_id` mediumint(5) DEFAULT NULL," + "`block_subid` mediumint(5) DEFAULT NULL,"
+                    + "`old_block_id` mediumint(5) DEFAULT NULL," + "`old_block_subid` mediumint(5) DEFAULT NULL,"
+                    + "PRIMARY KEY (`id`)," + "KEY `epoch` (`epoch`),"
+                    + "KEY  `location` (`world_id`, `x`, `z`, `y`, `action_id`)"
+                    + ") ENGINE=InnoDB  DEFAULT CHARSET=utf8;";
+            st.executeUpdate( query );
 
-			} catch (SQLException e) {
-				log("Database connection error: " + e.getMessage());
-				e.printStackTrace();
-			}
-		}
+            // extra prism data table (check if it exists first, so we can avoid
+            // re-adding foreign key stuff)
+            final DatabaseMetaData metadata = conn.getMetaData();
+            ResultSet resultSet;
+            resultSet = metadata.getTables( null, null, "" + prefix + "data_extra", null );
+            if( !resultSet.next() ) {
 
-		// MYSQL
-		else if (getConfig().getString("prism.database.mode").equalsIgnoreCase(
-				"mysql")) {
-			try {
-				final Connection conn = dbc();
-				if (conn == null)
-					return;
-				String query = "CREATE TABLE IF NOT EXISTS `prism_actions` ("
-						+ "`id` int(11) unsigned NOT NULL auto_increment,"
-						+ "`action_time` timestamp NOT NULL default CURRENT_TIMESTAMP,"
-						+ "`action_type` varchar(20) NOT NULL,"
-						+ "`player` varchar(16) NOT NULL,"
-						+ "`world` varchar(255) NOT NULL,"
-						+ "`x` int(11) NOT NULL," + "`y` smallint(5) NOT NULL,"
-						+ "`z` int(11) NOT NULL,"
-						+ "`block_id` mediumint(5) default NULL,"
-						+ "`block_subid` mediumint(5) default NULL,"
-						+ "`old_block_id` mediumint(5) default NULL,"
-						+ "`old_block_subid` mediumint(5) default NULL,"
-						+ "`data` varchar(255) NULL," + "PRIMARY KEY  (`id`), "
-						+ "KEY `x` (`x`), " + "KEY `block_id` (`block_id`)"
-						+ ") ENGINE=InnoDB;";
+                // extra data
+                query = "CREATE TABLE IF NOT EXISTS `" + prefix + "data_extra` ("
+                        + "`extra_id` int(10) unsigned NOT NULL AUTO_INCREMENT,"
+                        + "`data_id` int(10) unsigned NOT NULL," + "`data` text NULL," + "`te_data` text NULL,"
+                        + "PRIMARY KEY (`extra_id`)," + "KEY `data_id` (`data_id`)"
+                        + ") ENGINE=InnoDB  DEFAULT CHARSET=utf8;";
+                st.executeUpdate( query );
 
-				Statement st = conn.createStatement();
-				st.executeUpdate(query);
+                // add extra data delete cascade
+                query = "ALTER TABLE `" + prefix + "data_extra` ADD CONSTRAINT `" + prefix + "data_extra_ibfk_1` FOREIGN KEY (`data_id`) REFERENCES `" + prefix + "data` (`id`) ON DELETE CASCADE ON UPDATE NO ACTION;";
+                st.executeUpdate( query );
+            }
 
-				query = "CREATE TABLE IF NOT EXISTS `prism_meta` ("
-						+ "`id` int(10) unsigned NOT NULL auto_increment,"
-						+ "`k` varchar(25) NOT NULL,"
-						+ "`v` varchar(255) NOT NULL," + "PRIMARY KEY  (`id`)"
-						+ ") ENGINE=InnoDB DEFAULT CHARSET=latin1;";
-				st.executeUpdate(query);
-				st.close();
-				conn.close();
-			} catch (SQLException e) {
-				log("Database connection error: " + e.getMessage());
-				e.printStackTrace();
-			}
-		}
-	}
+            // meta
+            query = "CREATE TABLE IF NOT EXISTS `" + prefix + "meta` (" + "`id` int(10) unsigned NOT NULL AUTO_INCREMENT,"
+                    + "`k` varchar(25) NOT NULL," + "`v` varchar(255) NOT NULL," + "PRIMARY KEY (`id`)"
+                    + ") ENGINE=InnoDB  DEFAULT CHARSET=utf8;";
+            st.executeUpdate( query );
 
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public Language getLang() {
-		return this.language;
-	}
+            // players
+            query = "CREATE TABLE IF NOT EXISTS `" + prefix + "players` ("
+                    + "`player_id` int(10) unsigned NOT NULL AUTO_INCREMENT," + "`player` varchar(255) NOT NULL,"
+                    + "`player_uuid` binary(16) NOT NULL,"
+                    + "PRIMARY KEY (`player_id`)," + "UNIQUE KEY `player` (`player`),"
+                    + "UNIQUE KEY `player_uuid` (`player_uuid`)"
+                    + ") ENGINE=InnoDB  DEFAULT CHARSET=utf8;";
+            st.executeUpdate( query );
 
-	
-	/**
-	 * 
-	 */
-	public void checkPluginDependancies() {
+            // worlds
+            query = "CREATE TABLE IF NOT EXISTS `" + prefix + "worlds` ("
+                    + "`world_id` int(10) unsigned NOT NULL AUTO_INCREMENT," + "`world` varchar(255) NOT NULL,"
+                    + "PRIMARY KEY (`world_id`)," + "UNIQUE KEY `world` (`world`)"
+                    + ") ENGINE=InnoDB  DEFAULT CHARSET=utf8;";
+            st.executeUpdate( query );
 
-		// HeroChat
-		Plugin herochat = getServer().getPluginManager().getPlugin("Herochat");
-		if (herochat != null) {
-			enabledPlugins.add("Herochat");
-			log("HeroChat found. Switching chat listener to HC events");
-		}
+            // actions
+            cacheActionPrimaryKeys(); // Pre-cache, so we know if we need to
+                                      // populate db
+            final String[] actions = actionRegistry.listAll();
+            for ( final String a : actions ) {
+                addActionName( a );
+            }
+        } catch ( final SQLException e ) {
+            log( "Database connection error: " + e.getMessage() );
+            e.printStackTrace();
+        } finally {
+            if( st != null )
+                try {
+                    st.close();
+                } catch ( final SQLException e ) {}
+            if( conn != null )
+                try {
+                    conn.close();
+                } catch ( final SQLException e ) {}
+        }
+    }
 
-		// WorldEdit
-		Plugin we = getServer().getPluginManager().getPlugin("WorldEdit");
-		if (we != null) {
-			plugin_worldEdit = (WorldEditPlugin) we;
-			PrismBlockEditSessionFactory.initialize();
-			log("WorldEdit found. Associated features enabled.");
-		} else {
-			log("WorldEdit not found. Certain optional features of Prism disabled.");
-		}
-	}
-
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public boolean dependencyEnabled(String pluginName) {
-		return enabledPlugins.contains(pluginName);
-	}
-	
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public static ArrayList<Integer> getIllegalBlocks(){
-		return illegalBlocks;
-	}
-	
-	
-	/**
+    /**
 	 * 
 	 */
-	public static ArrayList<String> getIllegalEntities(){
-		return illegalEntities;
-	}
-	
-	
-	/**
+    protected void cacheActionPrimaryKeys() {
+        String prefix = config.getString("prism.mysql.prefix");
+
+        Connection conn = null;
+        PreparedStatement s = null;
+        ResultSet rs = null;
+        try {
+
+            conn = dbc();
+            s = conn.prepareStatement( "SELECT action_id, action FROM " + prefix + "actions" );
+            rs = s.executeQuery();
+
+            while ( rs.next() ) {
+                debug( "Loaded " + rs.getString( 2 ) + ", id:" + rs.getInt( 1 ) );
+                prismActions.put( rs.getString( 2 ), rs.getInt( 1 ) );
+            }
+
+            debug( "Loaded " + prismActions.size() + " actions into the cache." );
+
+        } catch ( final SQLException e ) {
+            handleDatabaseException( e );
+        } finally {
+            if( rs != null )
+                try {
+                    rs.close();
+                } catch ( final SQLException e ) {}
+            if( s != null )
+                try {
+                    s.close();
+                } catch ( final SQLException e ) {}
+            if( conn != null )
+                try {
+                    conn.close();
+                } catch ( final SQLException e ) {}
+        }
+    }
+
+    /**
+     * Saves an action name to the database, and adds the id to the cache
+     * hashmap
+     */
+    public static void addActionName(String actionName) {
+        String prefix = config.getString("prism.mysql.prefix");
+
+        if( prismActions.containsKey( actionName ) )
+            return;
+
+        Connection conn = null;
+        PreparedStatement s = null;
+        ResultSet rs = null;
+        try {
+
+            conn = dbc();
+            s = conn.prepareStatement( "INSERT INTO " + prefix + "actions (action) VALUES (?)", Statement.RETURN_GENERATED_KEYS );
+            s.setString( 1, actionName );
+            s.executeUpdate();
+
+            rs = s.getGeneratedKeys();
+            if( rs.next() ) {
+                Prism.log( "Registering new action type to the database/cache: " + actionName + " " + rs.getInt( 1 ) );
+                prismActions.put( actionName, rs.getInt( 1 ) );
+            } else {
+                throw new SQLException( "Insert statement failed - no generated key obtained." );
+            }
+        } catch ( final SQLException e ) {
+
+        } finally {
+            if( rs != null )
+                try {
+                    rs.close();
+                } catch ( final SQLException e ) {}
+            if( s != null )
+                try {
+                    s.close();
+                } catch ( final SQLException e ) {}
+            if( conn != null )
+                try {
+                    conn.close();
+                } catch ( final SQLException e ) {}
+        }
+    }
+
+    /**
 	 * 
 	 */
-	public static HashMap<String,String> getAlertedOres(){
-		return alertedOres;
-	}
+    protected void cacheWorldPrimaryKeys() {
+        String prefix = config.getString("prism.mysql.prefix");
 
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public MaterialAliases getItems() {
-		return this.items;
-	}
+        Connection conn = null;
+        PreparedStatement s = null;
+        ResultSet rs = null;
+        try {
 
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public static ActionRegistry getActionRegistry() {
-		return actionRegistry;
-	}
+            conn = dbc();
+            s = conn.prepareStatement( "SELECT world_id, world FROM " + prefix + "worlds" );
+            rs = s.executeQuery();
 
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public static HandlerRegistry<?> getHandlerRegistry() {
-		return handlerRegistry;
-	}
+            while ( rs.next() ) {
+                prismWorlds.put( rs.getString( 2 ), rs.getInt( 1 ) );
+            }
+            debug( "Loaded " + prismWorlds.size() + " worlds into the cache." );
+        } catch ( final SQLException e ) {
+            handleDatabaseException( e );
+        } finally {
+            if( rs != null )
+                try {
+                    rs.close();
+                } catch ( final SQLException e ) {}
+            if( s != null )
+                try {
+                    s.close();
+                } catch ( final SQLException e ) {}
+            if( conn != null )
+                try {
+                    conn.close();
+                } catch ( final SQLException e ) {}
+        }
+    }
 
-	
-	/**
-	 * 
-	 * @return
-	 */
-	public static Ignore getIgnore() {
-		return ignore;
-	}
+    /**
+     * Saves a world name to the database, and adds the id to the cache hashmap
+     */
+    public static void addWorldName(String worldName) {
+        String prefix = config.getString("prism.mysql.prefix");
 
-	
-	/**
-	 * 
-	 */
-	public void endExpiredQueryCaches() {
-		getServer().getScheduler().scheduleSyncRepeatingTask(this,
-				new Runnable() {
+        if( prismWorlds.containsKey( worldName ) )
+            return;
 
-					public void run() {
-						java.util.Date date = new java.util.Date();
-						for (Map.Entry<String, QueryResult> query : cachedQueries.entrySet()) {
-							QueryResult result = query.getValue();
-							long diff = (date.getTime() - result.getQueryTime()) / 1000;
-							if (diff >= 120) {
-								cachedQueries.remove(query.getKey());
-							}
-						}
-					}
-				}, 2400L, 2400L);
-	}
-	
+        Connection conn = null;
+        PreparedStatement s = null;
+        ResultSet rs = null;
+        try {
 
-	/**
-	 * 
-	 */
-	public void endExpiredPreviews() {
-		getServer().getScheduler().scheduleSyncRepeatingTask(this,
-				new Runnable() {
+            conn = dbc();
+            s = conn.prepareStatement( "INSERT INTO " + prefix + "worlds (world) VALUES (?)", Statement.RETURN_GENERATED_KEYS );
+            s.setString( 1, worldName );
+            s.executeUpdate();
 
-					public void run() {
-						java.util.Date date = new java.util.Date();
-						for (Map.Entry<String, PreviewSession> query : playerActivePreviews.entrySet()) {
-							PreviewSession result = query.getValue();
-							long diff = (date.getTime() - result.getQueryTime()) / 1000;
-							if (diff >= 60) {
-								// inform player
-								Player player = prism.getServer().getPlayer(
-										result.getPlayer().getName());
-								if (player != null) {
-									player.sendMessage(Prism.messenger.playerHeaderMsg("Canceling forgotten preview."));
-								}
-								playerActivePreviews.remove(query.getKey());
-							}
-						}
-					}
-				}, 1200L, 1200L);
-	}
+            rs = s.getGeneratedKeys();
+            if( rs.next() ) {
+                Prism.log( "Registering new world to the database/cache: " + worldName + " " + rs.getInt( 1 ) );
+                prismWorlds.put( worldName, rs.getInt( 1 ) );
+            } else {
+                throw new SQLException( "Insert statement failed - no generated key obtained." );
+            }
+        } catch ( final SQLException e ) {
 
-	
-	/**
+        } finally {
+            if( rs != null )
+                try {
+                    rs.close();
+                } catch ( final SQLException e ) {}
+            if( s != null )
+                try {
+                    s.close();
+                } catch ( final SQLException e ) {}
+            if( conn != null )
+                try {
+                    conn.close();
+                } catch ( final SQLException e ) {}
+        }
+    }
+
+    /**
+     * 
+     * @return
+     */
+    public Language getLang() {
+        return this.language;
+    }
+
+    /**
 	 * 
 	 */
-	public void removeExpiredLocations() {
-		getServer().getScheduler().scheduleSyncRepeatingTask(this,
-				new Runnable() {
+    public void checkPluginDependancies() {
 
-					public void run() {
-						java.util.Date date = new java.util.Date();
-						// Remove locations logged over five minute ago.
-						for (Entry<Location, Long> entry : alertedBlocks.entrySet()) {
-							long diff = (date.getTime() - entry.getValue()) / 1000;
-							if (diff >= 300) {
-								alertedBlocks.remove(entry.getKey());
-							}
-						}
-					}
-				}, 1200L, 1200L);
-	}
+        // HeroChat
+        final Plugin herochat = getServer().getPluginManager().getPlugin( "Herochat" );
+        if( herochat != null ) {
+            enabledPlugins.add( "Herochat" );
+            log( "HeroChat found. Switching chat listener to HC events" );
+        }
 
-	
-	/**
+        // WorldEdit
+        final Plugin we = getServer().getPluginManager().getPlugin( "WorldEdit" );
+        if( we != null ) {
+            plugin_worldEdit = (WorldEditPlugin) we;
+            PrismBlockEditSessionFactory.initialize();
+            log( "WorldEdit found. Associated features enabled." );
+        } else {
+            log( "WorldEdit not found. Certain optional features of Prism disabled." );
+        }
+    }
+
+    /**
+     * 
+     * @return
+     */
+    public boolean dependencyEnabled(String pluginName) {
+        return enabledPlugins.contains( pluginName );
+    }
+
+    /**
+     * 
+     * @return
+     */
+    public static ArrayList<Integer> getIllegalBlocks() {
+        return illegalBlocks;
+    }
+
+    /**
 	 * 
 	 */
-	public void actionRecorderTask() {
-		int recorder_tick_delay = getConfig().getInt("prism.queue-empty-tick-delay");
-		if (recorder_tick_delay < 1) {
-			recorder_tick_delay = 3;
-		}
-		getServer().getScheduler().runTaskTimerAsynchronously(this,new ActionRecorder(prism), recorder_tick_delay,recorder_tick_delay);
-	}
+    public static ArrayList<String> getIllegalEntities() {
+        return illegalEntities;
+    }
 
-	
-	/**
+    /**
 	 * 
 	 */
-	public void discardExpiredDbRecords() {
+    public static HashMap<String, String> getAlertedOres() {
+        return alertedOres;
+    }
 
-		List<String> purgeRules = getConfig().getStringList("prism.db-records-purge-rules");
+    /**
+     * 
+     * @return
+     */
+    public static MaterialAliases getItems() {
+        return items;
+    }
 
-		if (!purgeRules.isEmpty()) {
+    /**
+     * 
+     * @return
+     */
+    public static ActionRegistry getActionRegistry() {
+        return actionRegistry;
+    }
 
-			final CopyOnWriteArrayList<QueryParameters> paramList = new CopyOnWriteArrayList<QueryParameters>();
+    /**
+     * 
+     * @return
+     */
+    public static HandlerRegistry<?> getHandlerRegistry() {
+        return handlerRegistry;
+    }
 
-			for (final String purgeArgs : purgeRules) {
+    /**
+     * 
+     * @return
+     */
+    public static Ignore getIgnore() {
+        return ignore;
+    }
 
-				// Process and validate all of the arguments
-				QueryParameters parameters = PreprocessArgs.process(prism,
-						null, purgeArgs.split(" "), PrismProcessType.DELETE, 0, false);
+    /**
+     * 
+     * @return
+     */
+    public PurgeManager getPurgeManager() {
+        return purgeManager;
+    }
 
-				if (parameters == null) {
-					log("Invalid parameters for database purge: " + purgeArgs);
-					continue;
-				}
+    /**
+     * Registers a parameter and a handler. Example:
+     * 
+     * pr l a:block-break. The "a" is an action, and the action handler will
+     * process what "block-break" refers to.
+     * 
+     * @param handler
+     */
+    public static void registerParameter(PrismParameterHandler handler) {
+        paramHandlers.put( handler.getName().toLowerCase(), handler );
+    }
 
-				if (parameters.getFoundArgs().size() > 0) {
-					parameters.setStringFromRawArgs(purgeArgs.split(" "), 0);
-					paramList.add(parameters);
-				}
-			}
+    /**
+     * 
+     * @return
+     */
+    public static HashMap<String, PrismParameterHandler> getParameters() {
+        return paramHandlers;
+    }
 
-			if (paramList.size() > 0) {
+    /**
+     * 
+     * @return
+     */
+    public static PrismParameterHandler getParameter(String name) {
+        return paramHandlers.get( name );
+    }
 
-				int purge_tick_delay = getConfig().getInt("prism.purge.batch-tick-delay");
-				if (purge_tick_delay < 1) {
-					purge_tick_delay = 20;
-				}
-
-				/**
-				 * We're going to cycle through the param rules, one rule at a
-				 * time in a single async task. This task will reschedule itself
-				 * when each purge cycle has completed and records remain
-				 */
-				log("Beginning prism database purge cycle. Will be performed in batches so we don't tie up the db...");
-				deleteTask = getServer().getScheduler().runTaskLaterAsynchronously(this,new PurgeTask(this, paramList,purge_tick_delay,new LogPurgeCallback()),purge_tick_delay);
-
-			}
-		}
-	}
-
-	
-	/**
+    /**
 	 * 
-	 * @param msg
 	 */
-	public void alertPlayers(Player player, String msg) {
-		for (Player p : getServer().getOnlinePlayers()) {
-			if (!p.equals(player)) {
-				if (p.hasPermission("prism.alerts")) {
-					p.sendMessage(messenger.playerMsg(ChatColor.RED + "[!] " + msg));
-				}
-			}
-		}
-	}
+    public void endExpiredQueryCaches() {
+        getServer().getScheduler().scheduleSyncRepeatingTask( this, new Runnable() {
 
-	
-	/**
-	 *
-	 * @return
-	 */
-	public String msgMissingArguments() {
-		return messenger.playerError("Missing arguments. Check /prism ? for help.");
-	}
+            @Override
+            public void run() {
+                final java.util.Date date = new java.util.Date();
+                for ( final Map.Entry<String, QueryResult> query : cachedQueries.entrySet() ) {
+                    final QueryResult result = query.getValue();
+                    final long diff = ( date.getTime() - result.getQueryTime() ) / 1000;
+                    if( diff >= 120 ) {
+                        cachedQueries.remove( query.getKey() );
+                    }
+                }
+            }
+        }, 2400L, 2400L );
+    }
 
-	
-	/**
-	 *
-	 * @return
-	 */
-	public String msgInvalidArguments() {
-		return messenger.playerError("Invalid arguments. Check /prism ? for help.");
-	}
-
-	
-	/**
-	 *
-	 * @return
-	 */
-	public String msgInvalidSubcommand() {
-		return messenger.playerError("Prism doesn't have that command. Check /prism ? for help.");
-	}
-
-	
-	/**
-	 *
-	 * @return
-	 */
-	public String msgNoPermission() {
-		return messenger.playerError("You don't have permission to perform this action.");
-	}
-	
-
-	/**
+    /**
 	 * 
-	 * @param player
-	 * @param msg
 	 */
-	public void notifyNearby(Player player, int radius, String msg) {
-		if (!getConfig().getBoolean("prism.appliers.notify-nearby.enabled")) {
-			return;
-		}
-		for (Player p : player.getServer().getOnlinePlayers()) {
-			if (!p.equals(player)) {
-				if (player.getWorld().equals(p.getWorld())) {
-					if (player.getLocation().distance(p.getLocation()) <= (radius + config.getInt("prism.appliers.notify-nearby.additional-radius"))) {
-						p.sendMessage(messenger.playerHeaderMsg(msg));
-					}
-				}
-			}
-		}
-	}
-	
+    public void endExpiredPreviews() {
+        getServer().getScheduler().scheduleSyncRepeatingTask( this, new Runnable() {
 
-	/**
+            @Override
+            public void run() {
+                final java.util.Date date = new java.util.Date();
+                for ( final Map.Entry<String, PreviewSession> query : playerActivePreviews.entrySet() ) {
+                    final PreviewSession result = query.getValue();
+                    final long diff = ( date.getTime() - result.getQueryTime() ) / 1000;
+                    if( diff >= 60 ) {
+                        // inform player
+                        final Player player = prism.getServer().getPlayer( result.getPlayer().getName() );
+                        if( player != null ) {
+                            player.sendMessage( Prism.messenger.playerHeaderMsg( "Canceling forgotten preview." ) );
+                        }
+                        playerActivePreviews.remove( query.getKey() );
+                    }
+                }
+            }
+        }, 1200L, 1200L );
+    }
+
+    /**
 	 * 
-	 * @param message
 	 */
-	public static void log(String message) {
-		log.info("[" + getPrismName() + "]: " + message);
-	}
-	
+    public void removeExpiredLocations() {
+        getServer().getScheduler().scheduleSyncRepeatingTask( this, new Runnable() {
 
-	/**
+            @Override
+            public void run() {
+                final java.util.Date date = new java.util.Date();
+                // Remove locations logged over five minute ago.
+                for ( final Entry<Location, Long> entry : alertedBlocks.entrySet() ) {
+                    final long diff = ( date.getTime() - entry.getValue() ) / 1000;
+                    if( diff >= 300 ) {
+                        alertedBlocks.remove( entry.getKey() );
+                    }
+                }
+            }
+        }, 1200L, 1200L );
+    }
+
+    /**
 	 * 
-	 * @param messages
 	 */
-	public static void logSection(String[] messages) {
-		if (messages.length > 0) {
-			log("--------------------- ## Important ## ---------------------");
-			for (String msg : messages) {
-				log(msg);
-			}
-			log("--------------------- ## ========= ## ---------------------");
-		}
-	}
+    public void actionRecorderTask() {
+        int recorder_tick_delay = getConfig().getInt( "prism.queue-empty-tick-delay" );
+        if( recorder_tick_delay < 1 ) {
+            recorder_tick_delay = 3;
+        }
+        // we schedule it once, it will reschedule itself
+        recordingTask = getServer().getScheduler().runTaskLaterAsynchronously( this, new RecordingTask( prism ),
+                recorder_tick_delay );
+    }
 
-	
-	/**
+    /**
 	 * 
-	 * @param message
 	 */
-	public static void debug(String message) {
-		if (config.getBoolean("prism.debug")) {
-			log.info("[" + plugin_name + "]: " + message);
-		}
-	}
-	
+    public void launchScheduledPurgeManager() {
+        final List<String> purgeRules = getConfig().getStringList( "prism.db-records-purge-rules" );
+        purgeManager = new PurgeManager( this, purgeRules );
+        // scheduledPurgeExecutor =
+        schedulePool.scheduleAtFixedRate( purgeManager, 0, 12, TimeUnit.HOURS );
+        // scheduledPurgeExecutor.cancel();
+    }
 
-	/**
+    /**
 	 * 
-	 * @param loc
 	 */
-	public static void debug(Location loc) {
-		debug("Location: " + loc.getBlockX() + " " + loc.getBlockY() + " " + loc.getBlockZ());
-	}
-	
+    public void launchInternalAffairs() {
+        final InternalAffairs recordingMonitor = new InternalAffairs( this );
+        recordingMonitorTask.scheduleAtFixedRate( recordingMonitor, 0, 5, TimeUnit.MINUTES );
+    }
 
-	/**
-	 * Disable the plugin
-	 */
-	public void disablePlugin() {
-		this.setEnabled(false);
-	}
-	
+    /**
+     * 
+     * @param msg
+     */
+    public void alertPlayers(Player player, String msg) {
+        for ( final Player p : getServer().getOnlinePlayers() ) {
+            if( !p.equals( player ) || getConfig().getBoolean( "prism.alerts.alert-player-about-self" ) ) {
+                if( p.hasPermission( "prism.alerts" ) ) {
+                    p.sendMessage( messenger.playerMsg( ChatColor.RED + "[!] " + msg ) );
+                }
+            }
+        }
+    }
 
-	/**
-	 * Shutdown
-	 */
-	@Override
-	public void onDisable() {
+    /**
+     * 
+     * @return
+     */
+    public String msgMissingArguments() {
+        return messenger.playerError( "Missing arguments. Check /prism ? for help." );
+    }
 
-		// Close pool connections when plugin disables
-		if (pool != null) {
-			pool.close();
-		}
+    /**
+     * 
+     * @return
+     */
+    public String msgInvalidArguments() {
+        return messenger.playerError( "Invalid arguments. Check /prism ? for help." );
+    }
 
-		log("Closing plugin.");
+    /**
+     * 
+     * @return
+     */
+    public String msgInvalidSubcommand() {
+        return messenger.playerError( "Prism doesn't have that command. Check /prism ? for help." );
+    }
 
-	}
+    /**
+     * 
+     * @return
+     */
+    public String msgNoPermission() {
+        return messenger.playerError( "You don't have permission to perform this action." );
+    }
+
+    /**
+     * 
+     * @param player
+     * @param msg
+     */
+    public void notifyNearby(Player player, int radius, String msg) {
+        if( !getConfig().getBoolean( "prism.appliers.notify-nearby.enabled" ) ) { return; }
+        for ( final Player p : player.getServer().getOnlinePlayers() ) {
+            if( !p.equals( player ) ) {
+                if( player.getWorld().equals( p.getWorld() ) ) {
+                    if( player.getLocation().distance( p.getLocation() ) <= ( radius + config
+                            .getInt( "prism.appliers.notify-nearby.additional-radius" ) ) ) {
+                        p.sendMessage( messenger.playerHeaderMsg( msg ) );
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 
+     * @param message
+     */
+    public static void log(String message) {
+        log.info( "[" + getPrismName() + "]: " + message );
+    }
+
+    /**
+     * 
+     * @param messages
+     */
+    public static void logSection(String[] messages) {
+        if( messages.length > 0 ) {
+            log( "--------------------- ## Important ## ---------------------" );
+            for ( final String msg : messages ) {
+                log( msg );
+            }
+            log( "--------------------- ## ========= ## ---------------------" );
+        }
+    }
+
+    /**
+     * 
+     * @param message
+     */
+    public static void debug(String message) {
+        if( config.getBoolean( "prism.debug" ) ) {
+            log.info( "[" + plugin_name + "]: " + message );
+        }
+    }
+
+    /**
+     * 
+     * @param loc
+     */
+    public static void debug(Location loc) {
+        debug( "Location: " + loc.getBlockX() + " " + loc.getBlockY() + " " + loc.getBlockZ() );
+    }
+
+    /**
+     * Disable the plugin
+     */
+    public void disablePlugin() {
+        this.setEnabled( false );
+    }
+
+    /**
+     * Shutdown
+     */
+    @Override
+    public void onDisable() {
+
+        if( getConfig().getBoolean( "prism.database.force-write-queue-on-shutdown" ) ) {
+            final QueueDrain drainer = new QueueDrain( this );
+            drainer.forceDrainQueue();
+        }
+
+        // Close pool connections when plugin disables
+        if( pool != null ) {
+            pool.close();
+        }
+
+        log( "Closing plugin." );
+
+    }
 }
