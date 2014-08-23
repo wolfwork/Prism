@@ -3,7 +3,6 @@ package me.botsko.prism;
 import com.sk89q.worldedit.bukkit.WorldEditPlugin;
 
 import me.botsko.elixr.MaterialAliases;
-import me.botsko.elixr.TypeUtils;
 import me.botsko.prism.actionlibs.*;
 import me.botsko.prism.appliers.PreviewSession;
 import me.botsko.prism.bridge.PrismBlockEditSessionFactory;
@@ -103,12 +102,9 @@ public class Prism extends JavaPlugin {
     public static HashMap<String, Integer> prismActions = new HashMap<String, Integer>();
 
     /**
-     * We store a basic index of blocks we anticipate will fall, so that when
+     * We store a basic index of hanging entities we anticipate will fall, so that when
      * they do fall we can attribute them to the player who broke the original
      * block.
-     * 
-     * Once the block fall is registered, it's removed from here, so data should
-     * not remain here long.
      */
     public ConcurrentHashMap<String, String> preplannedBlockFalls = new ConcurrentHashMap<String, String>();
 
@@ -203,14 +199,6 @@ public class Prism extends JavaPlugin {
             getServer().getPluginManager().registerEvents( new PrismInventoryEvents( this ), this );
             getServer().getPluginManager().registerEvents( new PrismVehicleEvents( this ), this );
 
-            // BlockPhysics
-            if( getConfig().getBoolean( "prism.bukkit.listeners.blockphysicsevent" ) ) {
-                getServer().getPluginManager().registerEvents( new PrismBlockPhysicsEvent( this ), this );
-            } else {
-                log( "You've configured prism to never listen to the BlockPhysicsEvent." );
-                log( "Prism will not be able to track block-fall, and block detachments, i.e. torches and signs." );
-            }
-
             // InventoryMoveItem
             if( getConfig().getBoolean( "prism.track-hopper-item-events" ) && Prism.getIgnore().event( "item-insert" ) ) {
                 getServer().getPluginManager().registerEvents( new PrismInventoryMoveItemEvent(), this );
@@ -218,11 +206,6 @@ public class Prism extends JavaPlugin {
 
             if( getConfig().getBoolean( "prism.tracking.api.enabled" ) ) {
                 getServer().getPluginManager().registerEvents( new PrismCustomEvents( this ), this );
-            }
-
-            // Assign Plugin listeners if enabled
-            if( dependencyEnabled( "Herochat" ) && getConfig().getBoolean( "prism.tracking.player-chat" ) ) {
-                getServer().getPluginManager().registerEvents( new PrismChannelChatEvents(), this );
             }
 
             // Assign listeners to our own events
@@ -695,13 +678,6 @@ public class Prism extends JavaPlugin {
 	 * 
 	 */
     public void checkPluginDependancies() {
-
-        // HeroChat
-        final Plugin herochat = getServer().getPluginManager().getPlugin( "Herochat" );
-        if( herochat != null ) {
-            enabledPlugins.add( "Herochat" );
-            log( "HeroChat found. Switching chat listener to HC events" );
-        }
 
         // WorldEdit
         final Plugin we = getServer().getPluginManager().getPlugin( "WorldEdit" );

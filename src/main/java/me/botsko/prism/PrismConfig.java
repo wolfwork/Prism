@@ -129,10 +129,6 @@ public class PrismConfig extends ConfigBase {
         illegalBlocks.add( 51 );
         config.addDefault( "prism.appliers.never-place-block", illegalBlocks );
 
-        // Force prevent some listeners from registering if people don't want
-        // the tps hits
-        config.addDefault( "prism.bukkit.listeners.blockphysicsevent", true );
-
         // Tracking
         config.addDefault( "prism.tracking.block-break", true );
         config.addDefault( "prism.tracking.block-burn", true );
@@ -250,6 +246,14 @@ public class PrismConfig extends ConfigBase {
         illegal_commands.add( "deop" );
         illegal_commands.add( "stop" );
         illegal_commands.add( "reload" );
+        illegal_commands.add( "bukkit:op" );
+        illegal_commands.add( "bukkit:deop" );
+        illegal_commands.add( "bukkit:stop" );
+        illegal_commands.add( "bukkit:reload" );
+        illegal_commands.add( "minecraft:op" );
+        illegal_commands.add( "minecraft:deop" );
+        illegal_commands.add( "minecraft:stop" );
+        illegal_commands.add( "minecraft:reload" );
         config.addDefault( "prism.alerts.illegal-commands.commands", illegal_commands );
 
         // Use Alerts
